@@ -12,7 +12,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """ساخت جداول دیتابیس در صورت نبود"""
+    """ساخت جداول دیتابیس در صورت نبود + مهاجرت برای نسخه‌های قبلی"""
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked_users (
@@ -24,14 +24,35 @@ def init_db() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id   INTEGER,
                 user_id     INTEGER NOT NULL,
                 username    TEXT,
                 text        TEXT,
                 media_type  TEXT,
+                category    TEXT,
                 timestamp   TEXT NOT NULL,
                 replied     INTEGER DEFAULT 0
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS thread_links (
+                bot_message_id INTEGER NOT NULL,
+                user_id        INTEGER NOT NULL,
+                thread_id      INTEGER NOT NULL,
+                PRIMARY KEY (bot_message_id, user_id)
+            )
+        """)
+        # مهاجرت ستون‌های جدید برای دیتابیس‌های قدیمی‌تر
+        for stmt in [
+            "ALTER TABLE messages ADD COLUMN thread_id INTEGER",
+            "ALTER TABLE messages ADD COLUMN category TEXT",
+        ]:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+        # برای پیام‌های قدیمی که thread_id ندارند، خودشان را thread می‌کنیم
+        conn.execute("UPDATE messages SET thread_id = id WHERE thread_id IS NULL")
         conn.commit()
 
 
@@ -73,24 +94,61 @@ def get_all_blocked() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-# -------- messages --------
+# -------- messages & threads --------
 
-def save_message(user_id: int, username: str, text: str | None, media_type: str | None = None) -> int:
-    """ذخیره پیام و برگرداندن شماره پیام"""
+def save_message(
+    user_id: int,
+    username: str,
+    text: str | None,
+    media_type: str | None = None,
+    category: str | None = None,
+    thread_id: int | None = None,
+) -> tuple[int, int]:
+    """ذخیره پیام در دیتابیس.
+
+    اگر thread_id داده نشود، یک گفتگوی (thread) جدید ساخته می‌شود.
+    خروجی: (شماره پیام, شماره گفتگو)
+    """
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO messages (user_id, username, text, media_type, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (user_id, username, text, media_type, datetime.now().isoformat())
+            "INSERT INTO messages (thread_id, user_id, username, text, media_type, category, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (thread_id, user_id, username, text, media_type, category, datetime.now().isoformat())
+        )
+        new_id = cur.lastrowid
+        if thread_id is None:
+            conn.execute("UPDATE messages SET thread_id = ? WHERE id = ?", (new_id, new_id))
+            thread_id = new_id
+        conn.commit()
+        return new_id, thread_id
+
+
+def mark_thread_replied(thread_id: int) -> None:
+    """علامت‌گذاری تمام پیام‌های یک گفتگو به عنوان پاسخ داده شده"""
+    with get_connection() as conn:
+        conn.execute("UPDATE messages SET replied = 1 WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+
+
+def save_thread_link(bot_message_id: int, user_id: int, thread_id: int) -> None:
+    """ذخیره ارتباط بین پیام ارسالی ربات به کاربر و شماره گفتگو
+    (برای تشخیص اینکه کاربر روی کدام گفتگو ریپلای می‌زند)"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO thread_links (bot_message_id, user_id, thread_id) VALUES (?, ?, ?)",
+            (bot_message_id, user_id, thread_id)
         )
         conn.commit()
-        return cur.lastrowid
 
 
-def mark_replied(message_id: int) -> None:
-    """علامت‌گذاری پیام به عنوان پاسخ داده شده"""
+def get_thread_link(bot_message_id: int, user_id: int) -> int | None:
+    """گرفتن شماره گفتگو از روی پیامی که کاربر به آن ریپلای کرده است"""
     with get_connection() as conn:
-        conn.execute("UPDATE messages SET replied = 1 WHERE id = ?", (message_id,))
-        conn.commit()
+        row = conn.execute(
+            "SELECT thread_id FROM thread_links WHERE bot_message_id = ? AND user_id = ?",
+            (bot_message_id, user_id)
+        ).fetchone()
+        return row["thread_id"] if row else None
 
 
 def get_stats() -> dict:
@@ -106,3 +164,12 @@ def get_stats() -> dict:
             "blocked_count": blocked_count,
             "unanswered": unanswered,
         }
+
+
+def get_category_stats() -> dict:
+    """تعداد پیام‌ها به تفکیک دسته‌بندی"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT category, COUNT(*) as cnt FROM messages WHERE category IS NOT NULL GROUP BY category"
+        ).fetchall()
+        return {r["category"]: r["cnt"] for r in rows}
