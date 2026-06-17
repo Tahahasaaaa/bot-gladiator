@@ -2,7 +2,7 @@ import os
 
 # اگر Environment Variable در Railway تعریف شده باشد، از آن استفاده می‌شود
 # در غیر این صورت از مقدار پیش‌فرض زیر استفاده می‌شود
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8492001698:AAF6nLaF5WGvtv3tdiljtZCq_6CiCPSX_XA")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8955432875:AAHufSyOQ423ChfyiptBSxI4NybeHb1q--A")
 
 # ---- پشتیبانی از چند ادمین ----
 # در Railway، متغیر ADMIN_IDS را با کاما جدا کن، مثلا: 1953490397,987654321
